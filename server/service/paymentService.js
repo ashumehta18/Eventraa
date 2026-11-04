@@ -10,8 +10,11 @@ const createPaymentLink = async (bookingId) => {
         if (!booking) {
             throw { status: 404, message: 'Booking not found' };
         }
-        if (booking.status !== 'Pending') {
-            throw { status: 400, message: 'This booking is not awaiting payment' };
+        if (String(booking.status || '').trim().toLowerCase() !== 'pending') {
+            throw {
+                status: 400,
+                message: `This booking is not awaiting payment (current status: ${booking.status || 'missing'}). Start a new booking if payment was not completed.`,
+            };
         }
 
         const event = booking.event || {};

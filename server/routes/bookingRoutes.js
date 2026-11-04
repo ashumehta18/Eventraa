@@ -89,6 +89,7 @@ router.post("/:eventId", protect, async (req, res) => {
       ticketType: ticket.type,
       quantity: requestedQuantity,
       unitPrice: ticket.price || 0,
+      status: "Pending",
     });
     await booking.save();
 
