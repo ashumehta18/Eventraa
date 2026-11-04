@@ -66,8 +66,9 @@ Add this Vercel environment variable for Production:
 | `REACT_APP_API_URL` | `https://<render-service>.onrender.com/api` |
 
 Use the Render URL followed by `/api`, with no trailing slash. The app reads
-this value at build time. The Vercel rewrite in `client/vercel.json` sends
-client-side routes back to the app so refreshes on those routes work.
+this value at build time. `client/vercel.json` proxies `/api/*` requests to
+Render and rewrites other paths to `index.html`, so client-side routes such as
+`/login` continue to work when opened or refreshed directly.
 
 ## 4. Connect and verify both services
 
