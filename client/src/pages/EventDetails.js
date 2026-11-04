@@ -30,6 +30,7 @@ function EventDetails() {
   const [reviewStats, setReviewStats] = useState(null);
   const [userReview, setUserReview] = useState(null);
   const [ticketQuantities, setTicketQuantities] = useState({});
+  const apiBaseUrl = process.env.REACT_APP_API_URL || "/api";
 
   /* Stable stacked images */
   const img1 = useMemo(() => EVENT_BANNERS[id?.charCodeAt(0) % EVENT_BANNERS.length], [id]);
@@ -37,7 +38,7 @@ function EventDetails() {
   const img3 = useMemo(() => EVENT_BANNERS[(id?.charCodeAt(0) + 2) % EVENT_BANNERS.length], [id]);
 
   useEffect(() => {
-    axios.get(`/api/events/${id}`)
+    axios.get(`${apiBaseUrl}/events/${id}`)
       .then(res => {
         setEvent(res.data);
         setLoading(false);
@@ -46,7 +47,7 @@ function EventDetails() {
         console.error("Error fetching event:", err);
         setLoading(false);
       });
-  }, [id]);
+  }, [id, apiBaseUrl]);
 
   /* ✅ BOOK TICKET LOGIC */
   const handleBook = async (ticketType, quantity) => {
@@ -63,7 +64,7 @@ function EventDetails() {
     try {
       // Create booking
       const res = await axios.post(
-        `/api/bookings/${id}`,
+        `${apiBaseUrl}/bookings/${id}`,
         { ticketType, quantity },
         { headers: { Authorization: `Bearer ${auth.token}` } }
       );
@@ -72,7 +73,7 @@ function EventDetails() {
       setBooking(newBooking);
 
       // Create payment link
-      const payRes = await fetch(`/api/payment/${newBooking._id}`, {
+      const payRes = await fetch(`${apiBaseUrl}/payment/${newBooking._id}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

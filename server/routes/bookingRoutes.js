@@ -14,55 +14,87 @@ const fetch = (...args) =>
  * Private (Users only)
  */
 router.post("/:eventId", protect, async (req, res) => {
+  let booking;
+  let reservedTicketType;
+  let reservedQuantity = 0;
+
   try {
     const eventId = req.params.eventId;
     const userId = req.user._id;
     const { ticketType, quantity = 1 } = req.body;
+    const requestedQuantity = Number(quantity);
 
-    // Validate quantity
-    if (quantity < 1) {
-      return res.status(400).json({ message: "Quantity must be at least 1" });
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+      return res.status(400).json({ message: "Quantity must be a positive whole number" });
     }
 
-    // Find the event
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: "Event not found" });
 
-    // Find the requested ticket type or pick first available
-    let ticket = ticketType 
+    const ticket = ticketType
       ? event.tickets.find(t => t.type === ticketType)
       : event.tickets[0];
-    
+
     if (!ticket) {
       return res.status(400).json({ message: "Ticket type not found!" });
     }
 
-    if (ticket.available < quantity) {
-      return res.status(400).json({ 
-        message: `Only ${ticket.available} tickets available for ${ticket.type}!` 
-      });
-    }
-
-    // Prevent double booking
-    const existingBooking = await Booking.findOne({ user: userId, event: eventId });
-    if (existingBooking) {
+    const paidBooking = await Booking.findOne({
+      user: userId,
+      event: eventId,
+      $or: [{ status: "Confirmed" }, { "paymentDetails.status": "Paid" }],
+    });
+    if (paidBooking) {
       return res.status(400).json({ message: "You already booked this event!" });
     }
 
-    // Create new booking
-    const booking = new Booking({
+    const pendingBooking = await Booking.findOne({
+      user: userId,
+      event: eventId,
+      status: "Pending",
+    });
+    if (pendingBooking) {
+      if (pendingBooking.ticketType !== ticket.type || pendingBooking.quantity !== requestedQuantity) {
+        return res.status(409).json({
+          message: `You have a pending booking for ${pendingBooking.quantity} ${pendingBooking.ticketType} ticket(s). Select the same ticket and quantity to continue payment.`,
+        });
+      }
+      return res.json({ booking: pendingBooking });
+    }
+
+    const reservedEvent = await Event.findOneAndUpdate(
+      {
+        _id: eventId,
+        tickets: {
+          $elemMatch: {
+            type: ticket.type,
+            available: { $gte: requestedQuantity },
+          },
+        },
+      },
+      { $inc: { "tickets.$.available": -requestedQuantity } },
+      { new: true }
+    );
+    if (!reservedEvent) {
+      return res.status(400).json({
+        message: `Not enough tickets available for ${ticket.type}. Please refresh and try again.`,
+      });
+    }
+    reservedTicketType = ticket.type;
+    reservedQuantity = requestedQuantity;
+
+    booking = new Booking({
       user: userId,
       event: eventId,
       ticketType: ticket.type,
-      quantity: quantity,
+      quantity: requestedQuantity,
+      unitPrice: ticket.price || 0,
     });
     await booking.save();
 
-    // Populate event and user to get full details for QR
     await booking.populate('event');
     await booking.populate('user');
 
-    // Encode the verification page itself so phone cameras open the ticket details.
     const serverUrl = (process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const verificationUrl = `${serverUrl}/api/bookings/verify/${booking._id}`;
 
@@ -78,12 +110,17 @@ router.post("/:eventId", protect, async (req, res) => {
     booking.qrCode = qrBase64;
     await booking.save();
 
-    // Reduce availability by quantity
-    ticket.available -= quantity;
-    await event.save();
-
     res.json({ booking });
   } catch (err) {
+    if (booking?._id) {
+      await Booking.deleteOne({ _id: booking._id, status: "Pending" });
+    }
+    if (reservedTicketType && reservedQuantity) {
+      await Event.updateOne(
+        { _id: req.params.eventId, "tickets.type": reservedTicketType },
+        { $inc: { "tickets.$.available": reservedQuantity } }
+      );
+    }
     console.error("Booking error:", err.message);
     res.status(500).json({ message: "Server error", error: err.message });
   }
@@ -96,7 +133,10 @@ router.post("/:eventId", protect, async (req, res) => {
  */
 router.get("/my", protect, async (req, res) => {
   try {
-    const bookings = await Booking.find({ user: req.user._id })
+    const bookings = await Booking.find({
+      user: req.user._id,
+      $or: [{ status: "Confirmed" }, { "paymentDetails.status": "Paid" }],
+    })
       .populate("event", "title date location image");
     res.json(bookings);
   } catch (err) {
@@ -137,6 +177,19 @@ router.get("/verify/:bookingId", async (req, res) => {
             <h1>❌ Booking Not Found</h1>
             <p class="error">This booking does not exist or has been cancelled.</p>
           </div>
+        </body>
+        </html>
+      `);
+    }
+
+    if (booking.status !== "Confirmed" && booking.paymentDetails?.status !== "Paid") {
+      return res.status(402).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Payment Required</title></head>
+        <body style="font-family: Arial, sans-serif; padding: 24px; text-align: center;">
+          <h1>Payment not confirmed</h1>
+          <p>This booking is not a valid ticket because payment has not been verified.</p>
         </body>
         </html>
       `);
@@ -340,7 +393,10 @@ router.get("/verify/:bookingId", async (req, res) => {
  */
 router.get("/event/:eventId", protect, async (req, res) => {
   try {
-    const bookings = await Booking.find({ event: req.params.eventId })
+    const bookings = await Booking.find({
+      event: req.params.eventId,
+      $or: [{ status: "Confirmed" }, { "paymentDetails.status": "Paid" }],
+    })
       .populate("user", "name email");
     res.json(bookings);
   } catch (err) {

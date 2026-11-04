@@ -22,6 +22,10 @@ const bookingSchema = new mongoose.Schema({
     default: 1,
     min: 1,
   },
+  unitPrice: {
+    type: Number,
+    min: 0,
+  },
   qrCode: {
     type: String, // we'll store the GoQR image URL
   },
@@ -31,6 +35,7 @@ const bookingSchema = new mongoose.Schema({
   },
   paymentDetails: {
     paymentId: { type: String, default: "" },
+    paymentLinkId: { type: String, default: "" },
     status: { type: String, default: "" },
   },
   createdAt: {

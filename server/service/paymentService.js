@@ -1,20 +1,43 @@
 const razorpay = require("../config/razorpayClient");
 const Booking = require("../models/Booking");
+const Event = require("../models/Event");
 
 // Generate Payment Link
 const createPaymentLink = async (bookingId) => {
+    let booking;
     try {
-        const booking = await Booking.findById(bookingId).populate('event').populate('user');
+        booking = await Booking.findById(bookingId).populate('event').populate('user');
         if (!booking) {
-            throw new Error('Booking not found');
+            throw { status: 404, message: 'Booking not found' };
+        }
+        if (booking.status !== 'Pending') {
+            throw { status: 400, message: 'This booking is not awaiting payment' };
         }
 
         const event = booking.event || {};
         const user = booking.user || {};
 
-        // Determine amount: prefer ticket price if available, else event.price, else 0
-        const ticketPrice = event.tickets && event.tickets.length ? (event.tickets[0].price || 0) : (event.price || 0);
-        const amountPaise = Math.round((ticketPrice || 0) * 100);
+        if (booking.paymentDetails?.paymentLinkId) {
+            const existingLink = await razorpay.paymentLink.fetch(booking.paymentDetails.paymentLinkId);
+            if (['created', 'paid'].includes(existingLink.status) && existingLink.short_url) {
+                return {
+                    paymentLinkId: existingLink.id,
+                    payment_link_url: existingLink.short_url,
+                };
+            }
+            booking.paymentDetails.paymentLinkId = '';
+            await booking.save();
+        }
+
+        const selectedTicket = event.tickets?.find((ticket) => ticket.type === booking.ticketType);
+        if (!selectedTicket) {
+            throw new Error('The selected ticket type is no longer available.');
+        }
+        const unitPrice = booking.unitPrice ?? selectedTicket.price ?? 0;
+        const amountPaise = Math.round(unitPrice * booking.quantity * 100);
+        if (amountPaise < 1) {
+            throw new Error('Payment links require a ticket price greater than zero.');
+        }
 
         const phone = (booking.user && booking.user.phone) || '';
 
@@ -36,10 +59,30 @@ const createPaymentLink = async (bookingId) => {
         };
 
         const paymentLink = await razorpay.paymentLink.create(paymentLinkRequest);
+        booking.paymentDetails = booking.paymentDetails || {};
+        booking.paymentDetails.paymentLinkId = paymentLink.id;
+        await booking.save();
         const paymentLinkId = paymentLink.id;
         const payment_link_url = paymentLink.short_url;
         return { paymentLinkId, payment_link_url };
     } catch (error) {
+        if (booking?.status === 'Pending' && !booking.paymentDetails?.paymentLinkId) {
+            try {
+                const cancelled = await Booking.updateOne(
+                    { _id: booking._id, status: 'Pending' },
+                    { $set: { status: 'Payment Failed' } }
+                );
+                if (cancelled.modifiedCount) {
+                    await Event.updateOne(
+                        { _id: booking.event._id, 'tickets.type': booking.ticketType },
+                        { $inc: { 'tickets.$.available': booking.quantity } }
+                    );
+                }
+            } catch (cleanupError) {
+                console.error('Failed to release unpaid booking inventory:', cleanupError);
+            }
+        }
+        if (error && typeof error === 'object' && error.status) throw error;
         console.error('Razorpay payment error:', error);
         if (error && error.response) {
             console.error('Razorpay error response:', error.response);
@@ -69,21 +112,43 @@ const createPaymentLink = async (bookingId) => {
 const updatePaymentInformation = async(reqData) => {
     
     const paymentId = reqData.payment_id;
+    const paymentLinkId = reqData.payment_link_id;
     const orderId = reqData.order_id;
     
     try {
+        if (!orderId) throw { status: 400, message: 'Missing order_id' };
+        if (!paymentId) throw { status: 400, message: 'Missing payment_id' };
+        if (!paymentLinkId) throw { status: 400, message: 'Missing payment_link_id' };
+
         const booking = await Booking.findById(orderId).populate('event').populate('user');
-        if (!booking) throw new Error('Booking not found');
-
-        const payment = await razorpay.payments.fetch(paymentId);
-
-        if (payment && payment.status === "captured") {
-            booking.paymentDetails = booking.paymentDetails || {};
-            booking.paymentDetails.paymentId = paymentId;
-            booking.paymentDetails.status = "Paid";
-            booking.status = "Confirmed";
-            await booking.save();
+        if (!booking) throw { status: 404, message: 'Booking not found' };
+        if (booking.paymentDetails?.paymentLinkId !== paymentLinkId) {
+            throw { status: 400, message: 'Payment link does not match this booking' };
         }
+
+        const paymentLink = await razorpay.paymentLink.fetch(paymentLinkId);
+        if (String(paymentLink.reference_id) !== String(booking._id) || paymentLink.status !== 'paid') {
+            throw { status: 402, message: 'Payment has not been completed for this booking' };
+        }
+        const payment = await razorpay.payments.fetch(paymentId);
+        if (payment.payment_link_id !== paymentLinkId || payment.status !== 'captured') {
+            throw { status: 402, message: 'Payment has not been captured for this booking' };
+        }
+
+        const ticket = booking.event?.tickets?.find((item) => item.type === booking.ticketType);
+        if (!ticket) {
+            throw { status: 400, message: 'The booked ticket type could not be verified' };
+        }
+        const unitPrice = booking.unitPrice ?? ticket.price ?? 0;
+        const expectedAmount = Math.round(unitPrice * booking.quantity * 100);
+        if (payment.amount !== expectedAmount || payment.currency !== 'INR') {
+            throw { status: 400, message: 'Payment amount does not match this booking' };
+        }
+
+        booking.paymentDetails.paymentId = paymentId;
+        booking.paymentDetails.status = "Paid";
+        booking.status = "Confirmed";
+        await booking.save();
 
         // Return fully populated booking so frontend can render ticket details clearly
         const updatedBooking = await Booking.findById(orderId).populate('event').populate('user');
@@ -91,9 +156,8 @@ const updatePaymentInformation = async(reqData) => {
         return resData;
     } catch (error) {
         console.error('Error updating payment information:', error);
-        let msg = 'Failed to update payment information';
-        if (error && typeof error === 'object') msg = error.message || msg;
-        else if (typeof error === 'string') msg = error;
+        if (error && typeof error === 'object' && error.status) throw error;
+        const msg = typeof error?.message === 'string' ? error.message : 'Failed to update payment information';
         throw { status: 500, message: msg };
     }
 

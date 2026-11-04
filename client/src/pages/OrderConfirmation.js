@@ -1,63 +1,56 @@
 import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import jsPDF from 'jspdf';
+import API from '../config/api';
 
 // This page is the callback endpoint Razorpay redirects to after payment.
 // It will call the backend 'update' endpoint so the server can verify the payment
 // then redirect the user to /explore (or show an error briefly).
 
-function useQuery() {
-  return new URLSearchParams(useLocation().search);
-}
-
 export default function OrderConfirmation() {
-  const query = useQuery();
+  const location = useLocation();
   const navigate = useNavigate();
   const [statusMsg, setStatusMsg] = useState('Processing payment...');
   const [booking, setBooking] = useState(null);
 
   useEffect(() => {
+    const query = new URLSearchParams(location.search);
     const payment_id = query.get('razorpay_payment_id');
     const payment_link_id = query.get('razorpay_payment_link_id');
     const payment_link_status = query.get('razorpay_payment_link_status');
     const signature = query.get('razorpay_signature');
     const reference_id = query.get('razorpay_payment_link_reference_id') || query.get('reference_id');
 
-    // Call backend to confirm and update booking/payment status
     (async () => {
       try {
-        const params = new URLSearchParams();
-        if (payment_id) params.append('payment_id', payment_id);
-        if (payment_link_id) params.append('payment_link_id', payment_link_id);
-        if (payment_link_status) params.append('payment_link_status', payment_link_status);
-        if (signature) params.append('razorpay_signature', signature);
-        if (reference_id) params.append('order_id', reference_id);
-
-        // backend endpoint expects query params and will return the updated booking
-        const res = await fetch(`/api/payment/update?${params.toString()}`);
-        const data = await res.json();
-        if (!res.ok) {
-          console.error('Payment update failed', data);
-          setStatusMsg('Payment processing failed. Redirecting...');
-          setTimeout(() => navigate('/explore'), 1200);
+        if (!payment_id || !payment_link_id || payment_link_status !== 'paid' || !reference_id) {
+          setStatusMsg('Payment was not completed. No ticket has been issued.');
           return;
         }
 
-        if (data && data.booking) {
+        const response = await API.get('/payment/update', {
+          params: {
+            payment_id,
+            payment_link_id,
+            payment_link_status,
+            razorpay_signature: signature,
+            order_id: reference_id,
+          },
+        });
+        const data = response.data;
+
+        if (data?.booking && data.booking.status === 'Confirmed' && data.booking.paymentDetails?.status === 'Paid') {
           setBooking(data.booking);
           setStatusMsg('Payment successful — your ticket is confirmed!');
         } else {
-          // no booking returned; still redirect after short message
-          setStatusMsg('Payment processed. Redirecting to events...');
-          setTimeout(() => navigate('/explore'), 1000);
+          setStatusMsg('Payment could not be verified. No ticket has been issued.');
         }
       } catch (err) {
-        console.error('Payment confirmation error', err);
-        setStatusMsg('Payment confirmation error. Redirecting...');
-        setTimeout(() => navigate('/explore'), 1000);
+        console.error('Payment confirmation error', err.response?.data || err);
+        setStatusMsg(err.response?.data?.message || 'Payment confirmation failed. No ticket has been issued.');
       }
     })();
-  }, [query, navigate]);
+  }, [location.search]);
 
   // Helper to download ticket PDF with QR
   const downloadPdf = () => {
@@ -119,7 +112,7 @@ export default function OrderConfirmation() {
   return (
     <div style={{ padding: 40, textAlign: 'center' }}>
       <h2>{statusMsg}</h2>
-      {!booking && <p>If everything is successful you will be redirected to Explore shortly.</p>}
+      {!booking && <p>Return to the event page to retry payment or choose another event.</p>}
       {booking && (
         <div style={{ marginTop: 20 }}>
           <p style={{ fontWeight: 600 }}>Booking ID: {booking._id}</p>
