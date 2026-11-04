@@ -105,12 +105,17 @@ const chatRoutes = require("./routes/chatRoutes");
 const app = express();
 
 /* -------------------- Middleware -------------------- */
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
-    credentials: true,
-  })
-);
+const cors = require('cors');
+
+app.use(cors({
+  origin: [
+    'https://eventraa-theta.vercel.app',
+    'http://localhost:3000'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json()); // ✅ REQUIRED for req.body
 
 /* -------------------- MongoDB Connection -------------------- */
